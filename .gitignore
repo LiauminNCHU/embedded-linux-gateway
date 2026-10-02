@@ -1,0 +1,28 @@
+# Build
+build/
+cmake-build-*/
+
+# Object files
+*.o
+*.a
+*.so
+
+# Executables
+gateway
+*.out
+
+# Runtime
+*.log
+*.pid
+
+# Temporary
+*.tmp
+*.swp
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
