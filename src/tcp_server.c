@@ -782,3 +782,58 @@ void *tcp_server_thread(void *arg)
 
     return NULL;
 }
+
+
+/*
+ * =========================
+ * 等待 TCP 客户端线程退出
+ * =========================
+ *
+ * main.c 开始关闭 Gateway 后：
+ *
+ * shutdown_all_clients()
+ *          ↓
+ * TCP client thread 退出
+ *          ↓
+ * client_thread_count--
+ *          ↓
+ * pthread_cond_broadcast()
+ *          ↓
+ * tcp_server_wait_clients()
+ *          ↓
+ * 所有 TCP client thread 退出
+ *
+ * 只有确认所有 TCP client thread
+ * 都已经退出后，main.c 才能安全
+ * 销毁整个 Gateway 的共享资源。
+ */
+void tcp_server_wait_clients(void)
+{
+    pthread_mutex_lock(&client_mutex);
+
+    while (client_thread_count > 0) {
+        pthread_cond_wait(&client_cond,
+                          &client_mutex);
+    }
+
+    pthread_mutex_unlock(&client_mutex);
+}
+
+
+/*
+ * =========================
+ * TCP 模块资源清理
+ * =========================
+ *
+ * TCP 模块内部负责：
+ *
+ * client_mutex
+ * client_cond
+ *
+ * main.c 不直接访问这些内部资源。
+ */
+void tcp_server_cleanup(void)
+{
+    pthread_mutex_destroy(&client_mutex);
+    pthread_cond_destroy(&client_cond);
+}

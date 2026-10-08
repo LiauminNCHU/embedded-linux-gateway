@@ -369,10 +369,25 @@ int main(void)
      */
     pthread_join(worker, NULL);
 
+    /*
+    * =========================
+    * 13. 等待 TCP Client
+    * =========================
+    *
+    * TCP server thread 退出
+    * 不代表已经创建的 TCP
+    * client thread 全部退出。
+    *
+    * 因此这里还需要等待：
+    *
+    * client_thread_count == 0
+    */
+    tcp_server_wait_clients();
+
 
     /*
      * =========================
-     * 13. 销毁消息队列
+     * 14. 销毁消息队列
      * =========================
      *
      * 必须确保所有使用 queue
@@ -387,10 +402,7 @@ int main(void)
      * 14. 销毁 TCP 客户端管理资源
      * =========================
      */
-    pthread_mutex_destroy(&client_mutex);
-
-    pthread_cond_destroy(&client_cond);
-
+    tcp_server_cleanup();
 
     printf("[Main] shutdown complete\n");
 

@@ -22,7 +22,7 @@ void *udp_server_thread(void *arg)
 
     char buffer[UDP_BUFFER_SIZE];
 
-    udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
 
     if (udp_fd < 0) {
         perror("[UDP] socket");

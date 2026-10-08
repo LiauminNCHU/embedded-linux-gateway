@@ -16,6 +16,13 @@ int main(void)
 
     char buffer[BUFFER_SIZE];
 
+    /*
+     * =========================
+     * 1. 创建 UDP Socket
+     * =========================
+     *
+     * SOCK_DGRAM 表示 UDP。
+     */
     client_fd = socket(AF_INET, SOCK_DGRAM, 0);
 
     if (client_fd < 0) {
@@ -23,6 +30,14 @@ int main(void)
         return 1;
     }
 
+
+    /*
+     * =========================
+     * 2. 配置服务器地址
+     * =========================
+     *
+     * 127.0.0.1:8888
+     */
     memset(&server_addr, 0, sizeof(server_addr));
 
     server_addr.sin_family = AF_INET;
@@ -31,63 +46,85 @@ int main(void)
     if (inet_pton(AF_INET,
                   "127.0.0.1",
                   &server_addr.sin_addr) <= 0) {
+
         perror("inet_pton");
+
         close(client_fd);
-        return 1;
-    }
 
-    const char *message1 = "hello";
-    const char *message2 = "world";
-
-    int ret = sendto(client_fd,
-                     message1,
-                     strlen(message1),
-                     0,
-                     (struct sockaddr *)&server_addr,
-                     sizeof(server_addr));
-
-    if (ret < 0) {
-        perror("sendto");
-        close(client_fd);
-        return 1;
-    }
-
-    printf("[Client] sent: %s\n", message1);
-
-    ret = sendto(client_fd,
-                     message2,
-                     strlen(message2),
-                     0,
-                     (struct sockaddr *)&server_addr,
-                     sizeof(server_addr));
-
-    if (ret < 0) {
-        perror("sendto");
-        close(client_fd);
         return 1;
     }
 
 
-    printf("[Client] sent: %s\n", message2);
+    /*
+     * =========================
+     * 3. 交互式发送
+     * =========================
+     *
+     * 用户输入一行，
+     * 就发送一个 UDP 数据报。
+     */
+    printf("Enter message (Ctrl+D to exit):\n");
 
-    int n = recvfrom(client_fd,
-                     buffer,
-                     sizeof(buffer) - 1,
-                     0,
-                     NULL,
-                     NULL);
+    while (fgets(buffer,
+                 sizeof(buffer),
+                 stdin) != NULL) {
 
-    if (n < 0) {
-        perror("recvfrom");
-        close(client_fd);
-        return 1;
+        /*
+         * 删除 fgets() 保存的换行符。
+         *
+         * 例如：
+         *
+         * "hello\n"
+         *
+         * 变成：
+         *
+         * "hello"
+         */
+        buffer[strcspn(buffer, "\n")] = '\0';
+
+        /*
+         * 空消息不发送。
+         */
+        if (buffer[0] == '\0') {
+            continue;
+        }
+
+
+        /*
+         * =========================
+         * 4. sendto()
+         * =========================
+         *
+         * 每调用一次 sendto()
+         * 就发送一个 UDP 数据报。
+         */
+        int ret = sendto(client_fd,
+                         buffer,
+                         strlen(buffer),
+                         0,
+                         (struct sockaddr *)&server_addr,
+                         sizeof(server_addr));
+
+        if (ret < 0) {
+
+            perror("sendto");
+
+            break;
+        }
+
+
+        printf("[Client] sent: %s\n", buffer);
     }
 
-    buffer[n] = '\0';
 
-    printf("[Client] recv: %s\n", buffer);
-
+    /*
+     * =========================
+     * 5. 关闭 Socket
+     * =========================
+     */
     close(client_fd);
+
+    printf("[Client] exited\n");
 
     return 0;
 }
