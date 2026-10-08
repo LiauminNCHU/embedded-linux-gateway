@@ -47,3 +47,8 @@ add_executable(tcp_client
 add_executable(udp_client
     test/udp_client.c
 )
+
+# epoll demo
+add_executable(epoll_demo
+    test/epoll_demo.c
+)

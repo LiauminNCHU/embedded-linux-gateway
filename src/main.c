@@ -369,20 +369,6 @@ int main(void)
      */
     pthread_join(worker, NULL);
 
-    /*
-    * =========================
-    * 13. 等待 TCP Client
-    * =========================
-    *
-    * TCP server thread 退出
-    * 不代表已经创建的 TCP
-    * client thread 全部退出。
-    *
-    * 因此这里还需要等待：
-    *
-    * client_thread_count == 0
-    */
-    tcp_server_wait_clients();
 
 
     /*
