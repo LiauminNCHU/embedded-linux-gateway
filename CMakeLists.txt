@@ -25,12 +25,17 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 #用main.c创建一个gateway的可执行程序
 add_executable(gateway
-    src/main.c
+    src/tcp_server.c
+    src/udp_server.c
     src/message_queue.c
 )
 
 add_executable(tcp_client
     src/tcp_client.c
+)
+
+add_executable(udp_client
+    test/udp_client.c
 )
 
 #使用linux的线程库

@@ -8,19 +8,20 @@
 #define MAX_MESSAGE_LEN 127
 #define BUFFER_SIZE (MAX_MESSAGE_LEN + 2)
 
-// typedef struct{
-//     int device_id;
-//     float temperature;
-//     float humidity;
-// }sensor_message_t;
+typedef enum {
+    MESSAGE_SOURCE_TCP,
+    MESSAGE_SOURCE_UDP,
+    MESSAGE_SOURCE_MQTT
+} message_source_t;
 
 typedef struct{
     int id;
+    message_source_t source;
     char message[MAX_MESSAGE_LEN + 1];
-}tcp_message_t;
+}gateway_message_t;
 
 typedef struct {
-    tcp_message_t buffer[QUEUE_SIZE];
+    gateway_message_t buffer[QUEUE_SIZE];
     
     int head;
     int tail;
@@ -32,8 +33,8 @@ typedef struct {
 }message_queue_t;
 
 int queue_init(message_queue_t* queue);
-int queue_push(message_queue_t *queue, tcp_message_t *message, volatile sig_atomic_t *running);
-int queue_pop(message_queue_t *queue, tcp_message_t *message, volatile sig_atomic_t *running);
+int queue_push(message_queue_t *queue, gateway_message_t *message, volatile sig_atomic_t *running);
+int queue_pop(message_queue_t *queue, gateway_message_t *message, volatile sig_atomic_t *running);
 int queue_destroy(message_queue_t *queue);
 
 #endif

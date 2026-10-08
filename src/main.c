@@ -2,234 +2,115 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
 #include <pthread.h>
 #include <signal.h>
-#include <errno.h>
 
 #include "message_queue.h"
+#include "tcp_server.h"
+#include "udp_server.h"
 
-#define MAX_MESSAGE_LEN 127
-#define BUFFER_SIZE (MAX_MESSAGE_LEN + 2)
 
-
+/*
+ * =========================
+ * Gateway 全局状态
+ * =========================
+ *
+ * queue:
+ *     TCP / UDP / MQTT 等网络模块
+ *     将消息放入统一消息队列。
+ *
+ * running:
+ *     整个 Gateway 的运行状态。
+ *
+ *     1 -> 正常运行
+ *     0 -> 开始退出
+ */
 message_queue_t queue;
+
 volatile sig_atomic_t running = 1;
 
-/* * ========================= * TCP 客户端线程管理 * ========================= * 
-* 每建立一个客户端连接， 
-* 就创建一个 client_node
-* 
-* 所有客户端 node 组成一个链表： 
-* 
-* client_list 
-* ↓ 
-* fd=4 → fd=5 → fd=6 
-* 
-* 主线程退出时遍历这个链表， 
-* 对所有 socket 调用 shutdown()， 
-* 从而唤醒阻塞在 recv() 的 TCP 线程。 */
 
-typedef struct clinet_node{
-    int fd;
-    struct client_node *next;
-}client_node_t;
+/*
+ * =========================
+ * SIGINT 信号处理
+ * =========================
+ *
+ * Ctrl + C
+ *     ↓
+ * SIGINT
+ *     ↓
+ * running = 0
+ *
+ * 注意：
+ * signal handler 中只做简单操作。
+ * 不在这里调用 pthread_mutex_lock、
+ * free、printf 等非异步信号安全函数。
+ */
+void sigint_handler(int sig)
+{
+    (void)sig;
 
-/* * 保护 client_list 的 mutex */ 
-pthread_mutex_t client_mutex = PTHREAD_MUTEX_INITIALIZER; 
-
-/* * 当前所有客户端 */ 
-client_node_t *client_list = NULL; 
-
-/* * 当前还没有退出的 TCP 客户端线程数量 */ 
-int client_thread_count = 0; 
-
-/* * 当 TCP 线程退出时， * 用这个条件变量通知主线程。 */ 
-pthread_cond_t client_cond = PTHREAD_COND_INITIALIZER;
-
-void sigint_handler(int sig){
     running = 0;
-    /* * write() 是异步信号安全的， * 可以在 signal handler 中使用。 */
-    write(STDOUT_FILENO, "SIGINT received\n", 16);
-}
 
-int add_client(int fd){
-    client_node_t *node = malloc(sizeof(client_node_t));
-
-    if(node == NULL){
-        return -1;
-    }
-
-    node->fd = fd;
-
-    pthread_mutex_lock(&client_mutex);
-
-    node->next = client_list;
-    client_list = node;
-
-    client_thread_count++;
-
-    pthread_mutex_unlock(&client_mutex);
-    
-    return 0;
-}
-
-void remove_client(int fd){
-    pthread_mutex_lock(&client_mutex);
-
-    client_node_t **current = &client_list;
-
-    while(*current != NULL){
-        if(((*current)->fd == fd)){
-            client_node_t *tmp = *current;
-
-            *current = tmp->next;
-
-            free(tmp);
-
-            client_thread_count--;
-            /* * 告诉等待中的主线程： * 又有一个 TCP 线程退出了。 */ 
-            pthread_cond_broadcast(&client_cond); 
-            
-            break;
-        }
-
-        current = &(*current)->next;
-    }
-
-    pthread_mutex_unlock(&client_mutex);
-}
-
-/* * ========================= * 关闭所有客户端 socket * ========================= * 
-* 注意： * * 这里使用 shutdown() * 而不是 close() * 
-* 因为 TCP 线程自己负责 close()。 */ 
-void shutdown_all_clients(void) { 
-    pthread_mutex_lock(&client_mutex); 
-    
-    client_node_t *current = client_list; 
-    while (current != NULL) { 
-        printf("[Main] shutdown client fd=%d\n", current->fd); 
-        
-        shutdown(current->fd, SHUT_RDWR); 
-        
-        current = current->next; 
-    } 
-        
-    pthread_mutex_unlock(&client_mutex); 
+    write(STDOUT_FILENO,
+          "SIGINT received\n",
+          16);
 }
 
 
-void *tcp_recv_thread(void *arg){
-    int client_fd = *(int *)arg;
+/*
+ * =========================
+ * Worker 线程
+ * =========================
+ *
+ * TCP / UDP
+ *      ↓
+ * message_queue
+ *      ↓
+ * Worker
+ *
+ * Worker 不关心消息来自哪个网络线程，
+ * 只负责统一消费消息。
+ */
+void *work_thread(void *arg)
+{
+    (void)arg;
 
-    free(arg);//直接释放掉malloc的client_fd
+    gateway_message_t message;
 
-    char buffer[BUFFER_SIZE];
-    int buffer_len = 0;//有效字节数buffer_len 表示当前 buffer 中已经存放了多少个有效字节，
-    //因此下一次 recv() 应该从 buffer[buffer_len] 开始写，也就是传入 buffer + buffer_len
+    while (running) {
 
-    
-    while(running){
-        /*
-         * buffer 最多保存：
-         *
-         * 127 字节业务内容
-         * + 1 字节 '\n'
-         * + 1 字节 '\0'
-         *
-         * 如果已经达到 128 字节有效数据，
-         * 说明 buffer 中已经没有空间继续接收。
-         */
-        if(buffer_len >= MAX_MESSAGE_LEN + 1){
-            fprintf(stderr, "[TCP] message too long");
+        if (queue_pop(&queue,
+                      &message,
+                      &running) != 0) {
             break;
         }
 
-        int n = recv(   client_fd,
-                        buffer + buffer_len,
-                        sizeof(buffer) - 1 - buffer_len,
-                        
-                        0);
-        
-        if(n < 0){
-            /* * recv() 被信号中断 * * 如果程序正在运行， * 可以继续 recv。 */
-            if(errno == EINTR){
-                if(!running){
-                    break;
-                }
+        const char *source;
 
-                continue;
-            }
-            perror("recv");
+        switch (message.source) {
+
+        case MESSAGE_SOURCE_TCP:
+            source = "TCP";
+            break;
+
+        case MESSAGE_SOURCE_UDP:
+            source = "UDP";
+            break;
+
+        case MESSAGE_SOURCE_MQTT:
+            source = "MQTT";
+            break;
+
+        default:
+            source = "UNKNOWN";
             break;
         }
 
-        if(n == 0){
-            printf("[TCP] client fd=%d disconnected\n", client_fd);
-            break;
-        }
-
-        buffer_len += n;
-        buffer[buffer_len] = '\0';
-        
-        char *p;//找到一个消息结尾的位置\n  p - buffer = \n的下标
-
-        while((p = strchr(buffer, '\n')) != NULL){
-            *p = '\0';
-            /*
-             * 当前协议规定：
-             * 单条业务内容最大 127 字节。
-             */
-            int message_len = p - buffer;
-
-            if (message_len > MAX_MESSAGE_LEN) {
-                fprintf(stderr, "[TCP] message too long\n");
-                close(client_fd);
-                goto thread_exit;
-            }
-
-            tcp_message_t message;
-
-            message.id = client_fd;//id 和 客户端对应
-
-            strcpy(message.message, buffer);
-
-            if(queue_push(&queue, &message, &running) != 0){
-                goto thread_exit;
-            }
-
-
-            printf("[TCP] message pushed to queue: %s\n", message.message);
-
-            int remaining_len = buffer_len - message_len - 1;
-            memmove(buffer, p + 1, remaining_len); // buffer_len - message_len - 1 剩余消息长度
-
-            buffer_len = remaining_len;
-
-            buffer[buffer_len] = '\0';
-        }
-    }
-    
-
-thread_exit: /* * TCP线程退出前： * * 1. 从客户端列表删除自己 * 2. close自己的 socket */ 
-    remove_client(client_fd); 
-    close(client_fd); 
-    printf( "[TCP] thread exited, fd=%d\n", client_fd );
-
-    return NULL;
-}
-
-void *work_thread(void *arg){
-    tcp_message_t message;
-
-    while(running){
-        if(queue_pop(&queue, &message, &running) != 0){
-            break;
-        }
-        
-        printf("[Worker] id = %d, message = %s\n", message.id, message.message);
-
+        printf("[Worker] source=%s, id=%d, message=%s\n",
+               source,
+               message.id,
+               message.message);
     }
 
     printf("[Worker] thread exited\n");
@@ -241,183 +122,277 @@ void *work_thread(void *arg){
 int main(void)
 {
     /*
-        *创建了一个结构体
-        结构体清零，
-        sa.sa_handler = sigint_handler;如果收到了SIGINT执行函数sigint_handler
-        清空信号掩码，处理SIGINT期间不会阻塞其他信号
-        sigaction 注册信号处理动作，比signal更加 可靠
-    */
+     * =========================
+     * 1. 注册 SIGINT
+     * =========================
+     *
+     * Ctrl + C
+     *     ↓
+     * sigint_handler()
+     *     ↓
+     * running = 0
+     */
     struct sigaction sa;
 
     memset(&sa, 0, sizeof(sa));
+
     sa.sa_handler = sigint_handler;
+
     sigemptyset(&sa.sa_mask);
 
-    if (sigaction(SIGINT, &sa, NULL) < 0) {
+    if (sigaction(SIGINT,
+                  &sa,
+                  NULL) < 0) {
+
         perror("sigaction");
+
         return 1;
     }
 
 
     /*
-        创建TCP监听Socket
-        AF_INET IPv4
-        SOCK_STREAM TCP协议
-        0 系统自动选择TCP协议
-    */
-    //创建Socket 
-    int server_fd;
+     * =========================
+     * 2. 初始化消息队列
+     * =========================
+     */
+    if (queue_init(&queue) != 0) {
 
-    struct sockaddr_in server_addr;
-    //创建Socket        IPv4    TCP字节流，SOCK_DGRAM是UDP
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+        fprintf(stderr,
+                "queue init failed\n");
 
-    if (server_fd < 0) {
-        perror("socket");
         return 1;
     }
 
-    int opt = 1;
 
-    //地址重用      允许服务器在关闭后立即重新绑定同一个端口，而不需要等待 TIME_WAIT状态结束
-    setsockopt( server_fd,   
-                SOL_SOCKET,
-                SO_REUSEADDR,
-                &opt,
-                sizeof(opt));
-
-
-    //本机测试
     /*
-        绑定IP和端口
-
-    */
-
-
-    memset(&server_addr, 0, sizeof(server_addr));
-
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(8888);
-    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-    //bind 绑定IP和端口
-    if (bind(server_fd,
-             (struct sockaddr *)&server_addr,
-             sizeof(server_addr)) < 0) {
-        perror("bind");
-        close(server_fd);
-        return 1;
-    }
-
-    //开始监听
-    if (listen(server_fd, 5) < 0) {
-        perror("listen");
-        close(server_fd);
-        return 1;
-    }
-
-    printf("TCP server listening on port 8888...\n");
-
-
-    if(queue_init(&queue) != 0){
-        fprintf(stderr, "queue init failed\n");
-        close(server_fd);
-        return 1;
-    }
-
+     * =========================
+     * 3. 创建 Worker 线程
+     * =========================
+     */
     pthread_t worker;
 
-    if(pthread_create(&worker, NULL, work_thread, NULL) != 0){
-        perror("pthread_create");
+    if (pthread_create(&worker,
+                       NULL,
+                       work_thread,
+                       NULL) != 0) {
+
+        perror("pthread_create worker");
+
         queue_destroy(&queue);
-        close(server_fd);
+
         return 1;
     }
 
-    while(running){
-        //接受客户端
-        int *client_fd = malloc(sizeof(int));
-        //创建失败处理
-        if(client_fd == NULL){
-            perror("malloc");
-            continue;
-        }
 
-        *client_fd = accept(server_fd, NULL, NULL);
+    /*
+     * =========================
+     * 4. 创建 TCP Server 线程
+     * =========================
+     *
+     * TCP 模块内部负责：
+     *
+     * socket()
+     * bind()
+     * listen()
+     * accept()
+     * TCP client thread
+     *
+     * main 不再关心 TCP 的具体实现。
+     */
+    pthread_t tcp_thread;
 
-        if(*client_fd < 0){
-            if(!running && errno == EINTR){//Interrupted system call —— 系统调用被信号中断。
-                free(client_fd);
-                break;
-            }
+    if (pthread_create(&tcp_thread,
+                       NULL,
+                       tcp_server_thread,
+                       NULL) != 0) {
 
-            perror("accept");
-            close(server_fd);
-            return 1;
-        }
+        perror("pthread_create tcp");
 
-        if (!running) { 
-            close(*client_fd); 
-            free(client_fd); 
-            break; 
-        }
+        running = 0;
 
-        printf("connected!fd = %d\n", *client_fd);
+        /*
+         * 唤醒可能阻塞在 queue
+         * 中的 Worker。
+         */
+        pthread_cond_broadcast(&queue.not_empty);
+        pthread_cond_broadcast(&queue.not_full);
 
-        if (add_client(*client_fd) != 0) { 
-            fprintf( stderr, "failed to add client\n" ); 
-            close(*client_fd); free(client_fd); 
-            continue; 
-        }
+        pthread_join(worker, NULL);
 
-        pthread_t tcp_thread;
+        queue_destroy(&queue);
 
-        if(pthread_create(&tcp_thread, NULL, tcp_recv_thread, client_fd) != 0){
-            perror("pthread create");
-
-            remove_client(*client_fd);
-
-            close(*client_fd);
-            
-            free(client_fd);
-            
-            continue;
-        }
-        
-        
-        //pthread_join(tcp_thread, NULL);   等待线程结束再继续
-        //线程结束后系统自动回收线程资源
-        pthread_detach(tcp_thread);
-
+        return 1;
     }
+
+
+    /*
+     * =========================
+     * 5. 创建 UDP Server 线程
+     * =========================
+     *
+     * UDP 模块内部负责：
+     *
+     * socket()
+     * bind()
+     * recvfrom()
+     * queue_push()
+     */
+    pthread_t udp_thread;
+
+    if (pthread_create(&udp_thread,
+                       NULL,
+                       udp_server_thread,
+                       NULL) != 0) {
+
+        perror("pthread_create udp");
+
+        running = 0;
+
+        /*
+         * 唤醒 Worker。
+         */
+        pthread_cond_broadcast(&queue.not_empty);
+        pthread_cond_broadcast(&queue.not_full);
+
+        /*
+         * 唤醒 TCP client thread。
+         */
+        shutdown_all_clients();
+
+        /*
+         * 等待 TCP server thread。
+         */
+        pthread_join(tcp_thread, NULL);
+
+        /*
+         * 等待 Worker。
+         */
+        pthread_join(worker, NULL);
+
+        queue_destroy(&queue);
+
+        return 1;
+    }
+
+
+    /*
+     * =========================
+     * 6. 主线程等待退出
+     * =========================
+     *
+     * main 不再执行：
+     *
+     * accept()
+     * recv()
+     * recvfrom()
+     *
+     * 这些工作全部交给对应模块。
+     *
+     * main 只负责整个 Gateway
+     * 的生命周期。
+     */
+    while (running) {
+        sleep(1);
+    }
+
+
+    /*
+     * =========================
+     * 7. 开始关闭 Gateway
+     * =========================
+     */
     printf("[Main] shutting down\n");
 
-    //唤醒所有在等待的 notempty notfull
+
+    /*
+     * =========================
+     * 8. 唤醒消息队列
+     * =========================
+     *
+     * Worker 可能正在：
+     *
+     * pthread_cond_wait()
+     *
+     * 这里广播，让它有机会退出。
+     */
     pthread_cond_broadcast(&queue.not_empty);
     pthread_cond_broadcast(&queue.not_full);
- 
-    shutdown_all_clients();
-    //通过client thread count等待所有TCP线程结束
-    pthread_mutex_lock(&client_mutex);
-    
-    while (client_thread_count > 0) { 
-        pthread_cond_wait(&client_cond, &client_mutex);
-    } 
-    
-    pthread_mutex_unlock(&client_mutex);
 
-    //等待指定线程结束 worker
+
+    /*
+     * =========================
+     * 9. 关闭所有 TCP 客户端
+     * =========================
+     *
+     * TCP client thread 可能阻塞在：
+     *
+     * recv()
+     *
+     * shutdown()
+     * 会使 recv() 返回，
+     * 从而让 TCP client thread
+     * 能够正常退出。
+     */
+    shutdown_all_clients();
+
+
+    /*
+     * =========================
+     * 10. 等待 TCP Server
+     * =========================
+     *
+     * TCP server thread
+     * 自己负责：
+     *
+     * socket
+     * bind
+     * listen
+     * accept
+     *
+     * 最终退出。
+     */
+    pthread_join(tcp_thread, NULL);
+
+
+    /*
+     * =========================
+     * 11. 等待 UDP Server
+     * =========================
+     */
+    pthread_join(udp_thread, NULL);
+
+
+    /*
+     * =========================
+     * 12. 等待 Worker
+     * =========================
+     */
     pthread_join(worker, NULL);
 
+
+    /*
+     * =========================
+     * 13. 销毁消息队列
+     * =========================
+     *
+     * 必须确保所有使用 queue
+     * 的线程都已经退出之后，
+     * 才能销毁 queue。
+     */
     queue_destroy(&queue);
 
-    close(server_fd);
 
+    /*
+     * =========================
+     * 14. 销毁 TCP 客户端管理资源
+     * =========================
+     */
     pthread_mutex_destroy(&client_mutex);
 
     pthread_cond_destroy(&client_cond);
-    
-    printf("[Main] shutting complete\n");
+
+
+    printf("[Main] shutdown complete\n");
 
     return 0;
 }

@@ -30,7 +30,7 @@ int queue_init(message_queue_t* queue){
 }
 
 
-int queue_push(message_queue_t *queue, tcp_message_t *message
+int queue_push(message_queue_t *queue, gateway_message_t *message
                 ,volatile sig_atomic_t *running)
 {
     pthread_mutex_lock(&queue->mutex);
@@ -60,7 +60,7 @@ int queue_push(message_queue_t *queue, tcp_message_t *message
 }
 
 
-int queue_pop(message_queue_t *queue, tcp_message_t *message
+int queue_pop(message_queue_t *queue, gateway_message_t *message
                 ,volatile sig_atomic_t *running)
                 {
     pthread_mutex_lock(&queue->mutex);
